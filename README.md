@@ -1,1 +1,1 @@
-sample text
+A Network Intrustion Detection System which tracks packets and informs user of suspicious activity.
