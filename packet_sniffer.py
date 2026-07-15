@@ -1,5 +1,6 @@
 """
-A packer sniffer which checks packets for malicious intent, e.g. port scanning, brute-forcing logins.
+A packer sniffer which checks packets for malicious intent,
+e.g. port scanning, brute-forcing logins.
 """
 
 # pylint: disable=invalid-name
@@ -9,6 +10,12 @@ from __future__ import annotations
 
 from typing import Any
 from scapy.all import ICMP, IP, IPv6, TCP, UDP, Packet
+from detector import PortScanDetector
+
+port_scan_detector = PortScanDetector(
+    port_threshold=10,
+    window_seconds=10.0,
+)
 
 def parse_packet(packet: Packet) -> dict[str, Any] | None :
     """
@@ -29,6 +36,7 @@ def parse_packet(packet: Packet) -> dict[str, Any] | None :
         return None
 
     event: dict[str, Any] = {
+        "timestamp": float(packet.time),
         "source_ip": source_IP,
         "destination_ip": dest_IP,
         "ip_version": ip_vers,
@@ -89,3 +97,13 @@ def process_packet(packet: Packet) -> None :
         )
 
     print(output)
+
+    alert = port_scan_detector.process_event(event)
+    if alert is not None :
+        print(
+            "[ALERT] Possible port scan: "
+            f"{alert.source_ip} contacted "
+            f"{len(alert.unique_ports)} ports on "
+            f"{alert.destination_ip}. "
+            f"Ports: {alert.unique_ports}"
+        )
