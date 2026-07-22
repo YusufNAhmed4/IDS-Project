@@ -3,7 +3,7 @@ The actual detector. Uses a deque to check if a src IP
 has sent too many unacknowledged packets to various ports.
 """
 
-# pylint: disable=invalid-name
+# pylint: disable=invalid-name, too-few-public-methods
 
 from __future__ import annotations
 
@@ -21,6 +21,16 @@ class PortAlert :
     last_seen_time: float
     unique_ports: tuple[int, ...]
 
+
+def is_tcp_connection_attempt(event: dict[str, Any]) -> bool :
+    """Checks whether an event is a TCP connection without an ACK"""
+    if event.get("protocol") != "TCP" :
+        return False
+    if event.get("destination_port") is None :
+        return False
+
+    flags = str(event.get("tcp_flags") or "")
+    return "S" in flags and "A" not in flags
 
 class PortScanDetector :
     """
@@ -53,7 +63,7 @@ class PortScanDetector :
 
     def process_event(self, event: dict[str, Any]) -> PortAlert | None :
         """Processes one event and possibly returns an alert."""
-        if not self.is_tcp_connection_attempt(event) :
+        if not is_tcp_connection_attempt(event) :
             return None
 
         timestamp = float(event.get("timestamp"))
@@ -98,13 +108,78 @@ class PortScanDetector :
             attempts.popleft()
 
 
-    @staticmethod
-    def is_tcp_connection_attempt(event: dict[str, Any]) -> bool :
-        """Checks whether an event is a TCP connection without an ACK"""
-        if event.get("protocol") != "TCP" :
-            return False
-        if event.get("destination_port") is None :
-            return False
 
-        flags = str(event.get("tcp_flags") or "")
-        return "S" in flags and "A" not in flags
+@dataclass(frozen=True)
+class LogAlert :
+    """Info describing a possible brute force issue."""
+
+    source_ip: str
+    destination_ip: str
+    first_seen_time: float
+    last_seen_time: float
+    num_attempts: int
+
+class RepeatLogDetector :
+    """
+    Detect one source trying to repeatedly access one dest port.
+    Only TCP packets which haven't been ACKed are considered.
+    """
+
+    def __init__ (
+            self,
+            attempt_threshold: 10,
+            window_seconds: 10.0
+    ) -> None :
+        if attempt_threshold <= 0 :
+            raise ValueError("attempt_threshold must be > 0.0")
+        if window_seconds <= 0.0 :
+            raise ValueError("window_seconds must be > 0.0")
+
+        self.attempt_threshold = attempt_threshold
+        self.window_seconds = window_seconds
+
+
+        # key: (source IP, dest IP + port)
+        # value: tuple((timestamp))
+        self._attempts: dict[
+            tuple[str, str],
+            deque[float],
+        ] = defaultdict(deque)
+
+    def process_event(self, event: dict[str, Any]) -> PortAlert | None :
+        """Processes one event and possibly returns an alert."""
+        if not is_tcp_connection_attempt(event) :
+            return None
+
+        timestamp = float(event.get("timestamp"))
+        source_IP = str(event.get("source_ip"))
+        dest_IP = str(event.get("destination_ip"))
+        dest_port = str(event.get("destination_port"))
+
+        key = (source_IP, dest_IP + dest_port)
+        attempts = self._attempts[key]
+
+        attempts.append(timestamp)
+        self._remove_expired_attempts(attempts, timestamp)
+
+        if len(attempts) < self.attempt_threshold :
+            #If below threshold, throw out alert
+            return None
+
+        return LogAlert(
+            source_ip=source_IP,
+            destination_ip=dest_IP,
+            first_seen_time=attempts[0],
+            last_seen_time=attempts[-1],
+            num_attempts=len(attempts)
+        )
+
+    def _remove_expired_attempts(
+            self,
+            attempts: deque[tuple[float, int]],
+            current_time: float
+        ) -> None :
+        """Removes old attempts from attempt deque."""
+        cutoff = current_time - self.window_seconds
+        while attempts and attempts[0] < cutoff :
+            attempts.popleft()
